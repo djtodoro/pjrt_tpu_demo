@@ -103,8 +103,50 @@ std::string EscapeMlirString(const std::string& raw) {
     return out;
 }
 
+// Standard base64 encoder. jaxlib's `as_tpu_kernel` uses base64 for the
+// JSON backend_config's "body" field. We replicate that format.
+std::string Base64Encode(const std::string& data) {
+    static const char* tbl =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+    size_t i = 0;
+    while (i + 3 <= data.size()) {
+        uint32_t v = (static_cast<uint8_t>(data[i]) << 16) |
+                     (static_cast<uint8_t>(data[i + 1]) << 8) |
+                     static_cast<uint8_t>(data[i + 2]);
+        out += tbl[(v >> 18) & 63];
+        out += tbl[(v >> 12) & 63];
+        out += tbl[(v >> 6) & 63];
+        out += tbl[v & 63];
+        i += 3;
+    }
+    if (i < data.size()) {
+        uint32_t v = static_cast<uint8_t>(data[i]) << 16;
+        if (i + 1 < data.size())
+            v |= static_cast<uint8_t>(data[i + 1]) << 8;
+        out += tbl[(v >> 18) & 63];
+        out += tbl[(v >> 12) & 63];
+        out += (i + 1 < data.size()) ? tbl[(v >> 6) & 63] : '=';
+        out += '=';
+    }
+    return out;
+}
+
+// Build the StableHLO wrapper with the correct Mosaic backend_config format.
+// The JSON shape comes from jaxlib's `CustomCallBackendConfig.to_json()`:
+//     {"custom_call_config": {"body": "<base64>"}}
+//
+// The body is the Mosaic MLIR bytes (text is accepted by ir.Module.parse,
+// though jaxlib normally feeds bytecode). We try text first; if libtpu
+// rejects it we'd need a bytecode pre-processing step.
 std::string WrapMosaicInStableHlo(const std::string& mosaic_text) {
-    const std::string escaped = EscapeMlirString(mosaic_text);
+    const std::string body_b64 = Base64Encode(mosaic_text);
+    // Inner JSON; escape the embedded quotes for the MLIR string literal.
+    const std::string json =
+        std::string("{\\\"custom_call_config\\\": {\\\"body\\\": \\\"")
+        + body_b64 + "\\\"}}";
+
     return
         "module @wrapper {\n"
         "  func.func @main(\n"
@@ -112,7 +154,7 @@ std::string WrapMosaicInStableHlo(const std::string& mosaic_text) {
         "      %rhs: tensor<128xf32>\n"
         "  ) -> tensor<128xf32> {\n"
         "    %out = stablehlo.custom_call @tpu_custom_call(%lhs, %rhs) {\n"
-        "      backend_config = \"" + escaped + "\",\n"
+        "      backend_config = \"" + json + "\",\n"
         "      api_version = 2 : i32\n"
         "    } : (tensor<128xf32>, tensor<128xf32>) -> tensor<128xf32>\n"
         "    return %out : tensor<128xf32>\n"
