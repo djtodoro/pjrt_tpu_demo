@@ -120,6 +120,20 @@ std::string WrapMosaicInStableHlo(const std::string& mosaic_text) {
         "}\n";
 }
 
+// DIAGNOSTIC: a minimal StableHLO that just returns its first argument.
+// Used to distinguish "compile path broken" from "Mosaic custom_call broken".
+std::string BuildTrivialPassThroughStableHlo() {
+    return
+        "module @passthrough {\n"
+        "  func.func @main(\n"
+        "      %lhs: tensor<128xf32>,\n"
+        "      %rhs: tensor<128xf32>\n"
+        "  ) -> tensor<128xf32> {\n"
+        "    return %lhs : tensor<128xf32>\n"
+        "  }\n"
+        "}\n";
+}
+
 // ===--------------------------------------------------------------------=== //
 // PJRT plugin loading
 // ===--------------------------------------------------------------------=== //
@@ -188,13 +202,24 @@ void PrintUsage(const char* argv0) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3 && argc != 4) {
+    // Scan for the optional --trivial flag (diagnostic only).
+    bool trivial = false;
+    std::vector<char*> positional;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--trivial") == 0) {
+            trivial = true;
+        } else {
+            positional.push_back(argv[i]);
+        }
+    }
+    if (positional.size() != 2 && positional.size() != 3) {
         PrintUsage(argc > 0 ? argv[0] : "pjrt-demo");
         return 1;
     }
-    const char* mosaic_path = argv[1];
-    const char* libtpu_path = argv[2];
-    const char* blob_out_path = (argc == 4) ? argv[3] : nullptr;
+    const char* mosaic_path = positional[0];
+    const char* libtpu_path = positional[1];
+    const char* blob_out_path =
+        (positional.size() == 3) ? positional[2] : nullptr;
 
     std::cout << "=== pjrt-demo ===\n";
     std::cout << "Mosaic MLIR: " << mosaic_path << "\n";
@@ -250,12 +275,20 @@ int main(int argc, char** argv) {
     }
 
     // ---- 5. Load Mosaic MLIR and wrap in StableHLO --------------------
-    std::string mosaic_text = LoadTextFile(mosaic_path);
-    if (mosaic_text.empty()) return 1;
-    std::string stablehlo = WrapMosaicInStableHlo(mosaic_text);
-    std::cout << "[5] Loaded Mosaic (" << mosaic_text.size()
-              << " bytes) and wrapped into StableHLO ("
-              << stablehlo.size() << " bytes)\n";
+    std::string stablehlo;
+    if (trivial) {
+        stablehlo = BuildTrivialPassThroughStableHlo();
+        std::cout << "[5] --trivial: using pass-through StableHLO ("
+                  << stablehlo.size() << " bytes), ignoring "
+                  << mosaic_path << "\n";
+    } else {
+        std::string mosaic_text = LoadTextFile(mosaic_path);
+        if (mosaic_text.empty()) return 1;
+        stablehlo = WrapMosaicInStableHlo(mosaic_text);
+        std::cout << "[5] Loaded Mosaic (" << mosaic_text.size()
+                  << " bytes) and wrapped into StableHLO ("
+                  << stablehlo.size() << " bytes)\n";
+    }
 
     // ---- 6. Compile ---------------------------------------------------
     PJRT_LoadedExecutable* executable = nullptr;
