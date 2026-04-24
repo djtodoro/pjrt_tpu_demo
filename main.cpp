@@ -380,7 +380,9 @@ int main(int argc, char** argv) {
     PJRT_Buffer* output_buffers[1] = {nullptr};
     PJRT_Buffer** output_list = output_buffers;
     PJRT_Buffer* input_args[2] = {buf_lhs, buf_rhs};
-    PJRT_Buffer* const* const input_list[1] = {input_args};
+    // Non-const to match PJRT 0.23 (PJRT_Buffer***); implicit const-adding
+    // conversion covers the newer type PJRT_Buffer* const* const*.
+    PJRT_Buffer** input_list[1] = {input_args};
     {
         PJRT_ExecuteOptions exec_options{};
         exec_options.struct_size = PJRT_ExecuteOptions_STRUCT_SIZE;

@@ -14,6 +14,26 @@ cmake --build build
 
 The binary lands at `build/pjrt-demo`.
 
+### Matching the XLA commit to your libtpu
+
+The PJRT C API evolves. The XLA checkout you build against must match
+the PJRT ABI version embedded in your `libtpu.so`, or `PJRT_Client_Create`
+will fail with a message like:
+
+```
+Unexpected PJRT_Client_Create_Args size: expected 72, got 88.
+Check installed software versions. The framework PJRT API version is 0.23.
+```
+
+For libtpu from `torch-xla 2.1.0` / `libtpu-nightly 0.1.dev20230825`
+(PJRT API 0.23), checkout an XLA commit from that date:
+
+```
+cd /path/to/xla
+git branch xla-current-main                              # save your current HEAD
+git checkout -b xla-v0.23 988ef292c4a4e1eefbd5141f52fefde129138660
+```
+
 ## Run
 
 On a TPU VM (tested with `pip install torch-xla[tpu]`):
