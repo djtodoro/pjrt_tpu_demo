@@ -268,12 +268,29 @@ int main(int argc, char** argv) {
         program.format = kFormat;
         program.format_size = sizeof(kFormat) - 1;  // 4, without NUL
 
+        // Minimal CompileOptionsProto (from xla/pjrt/compile_options.proto):
+        //   CompileOptionsProto.executable_build_options (field 3, message)
+        //     ExecutableBuildOptionsProto.num_replicas   (field 4, int64) = 1
+        //     ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
+        //
+        // Wire format:
+        //   0x1A 0x04  = tag(field=3, wire=length-delim), length=4
+        //     0x20 0x01 = tag(field=4, wire=varint), value=1    (num_replicas)
+        //     0x28 0x01 = tag(field=5, wire=varint), value=1    (num_partitions)
+        //
+        // Without this, PJRT rejects with "Invalid (replica_count,
+        // computation_count) pair: (0,0)".
+        static constexpr unsigned char kCompileOptions[] = {
+            0x1A, 0x04, 0x20, 0x01, 0x28, 0x01,
+        };
+
         PJRT_Client_Compile_Args compile_args{};
         compile_args.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE;
         compile_args.client = client;
         compile_args.program = &program;
-        compile_args.compile_options = nullptr;
-        compile_args.compile_options_size = 0;
+        compile_args.compile_options =
+            reinterpret_cast<const char*>(kCompileOptions);
+        compile_args.compile_options_size = sizeof(kCompileOptions);
         if (!CheckError(api, api->PJRT_Client_Compile(&compile_args),
                         "PJRT_Client_Compile")) {
             return 1;
