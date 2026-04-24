@@ -150,14 +150,14 @@ std::string WrapMosaicInStableHlo(const std::string& mosaic_text) {
     return
         "module @wrapper {\n"
         "  func.func @main(\n"
-        "      %lhs: tensor<128xf32>,\n"
-        "      %rhs: tensor<128xf32>\n"
-        "  ) -> tensor<128xf32> {\n"
+        "      %lhs: tensor<8x128xf32>,\n"
+        "      %rhs: tensor<8x128xf32>\n"
+        "  ) -> tensor<8x128xf32> {\n"
         "    %out = stablehlo.custom_call @tpu_custom_call(%lhs, %rhs) {\n"
         "      backend_config = \"" + json + "\",\n"
         "      api_version = 2 : i32\n"
-        "    } : (tensor<128xf32>, tensor<128xf32>) -> tensor<128xf32>\n"
-        "    return %out : tensor<128xf32>\n"
+        "    } : (tensor<8x128xf32>, tensor<8x128xf32>) -> tensor<8x128xf32>\n"
+        "    return %out : tensor<8x128xf32>\n"
         "  }\n"
         "}\n";
 }
@@ -423,7 +423,9 @@ int main(int argc, char** argv) {
     }
 
     // ---- 7. Prepare host-side inputs ----------------------------------
-    constexpr size_t N = 128;
+    constexpr size_t ROWS = 8;
+    constexpr size_t COLS = 128;
+    constexpr size_t N = ROWS * COLS;  // 1024
     std::vector<float> host_lhs(N), host_rhs(N);
     for (size_t i = 0; i < N; ++i) {
         host_lhs[i] = static_cast<float>(i);
@@ -433,7 +435,8 @@ int main(int argc, char** argv) {
     // ---- 8. Upload inputs to device -----------------------------------
     auto upload = [&](const std::vector<float>& host_data)
         -> PJRT_Buffer* {
-        int64_t dims[] = {static_cast<int64_t>(host_data.size())};
+        int64_t dims[] = {static_cast<int64_t>(ROWS),
+                          static_cast<int64_t>(COLS)};
 
         PJRT_Client_BufferFromHostBuffer_Args args{};
         args.struct_size =
@@ -442,7 +445,7 @@ int main(int argc, char** argv) {
         args.data = host_data.data();
         args.type = PJRT_Buffer_Type_F32;
         args.dims = dims;
-        args.num_dims = 1;
+        args.num_dims = 2;
         args.byte_strides = nullptr;
         args.num_byte_strides = 0;
         args.host_buffer_semantics =

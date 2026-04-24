@@ -1,44 +1,42 @@
-// Sample Mosaic IR kernel — vector add on 128-lane f32 VMEM memrefs.
+// Sample Mosaic IR kernel — vector add on 8x128 f32 VMEM memrefs.
 //
-// Conventions (libtpu 0.23 / Aug 2023):
+// Shape choice: 8x128 matches the TPU VPU's physical register file
+// (8 sublanes × 128 lanes). Mosaic's apply_vector_layout pass expects
+// vectors that align with this geometry; rank-1 128-element vectors
+// fail to legalize because they don't have a 2D shape to map onto the
+// sublane dimension.
 //
-//   * Function args carry a TiledLayoutAttr:
-//         memref<128xf32, #tpu.tiled<RANK,(tile_dims...)>, #tpu.memory_space<vmem>>
-//     Required by Mosaic's "All memref arguments should use the TiledLayoutAttr".
+// Layout (libtpu 0.23 syntax):
+//     #tpu.tiled<2,(8,128)>          rank=2, single tile (8,128)
+//     #tpu.memory_space<vmem>
 //
-//   * Inner uses (e.g. vector.load) see a layout-erased memref. Use
-//         tpu.erase_memref_layout %arg : <typed> -> <plain>
-//     to convert from the tiled-layout memref to the plain one. Required
-//     because upstream MLIR's vector.load verifier checks for unit stride
-//     on the innermost dim, which a non-linear tiled layout breaks.
-//
-//   * For rank-1 f32 memrefs of 128 elements on TPU v4, the canonical tile
-//     is (128) and the layout is `#tpu.tiled<1,(128)>`.
+// Inner uses get a layout-erased memref via tpu.erase_memref_layout
+// so upstream MLIR's unit-stride check on vector.load is satisfied.
 
 module {
   func.func @main(
-      %lhs_tiled: memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>,
-      %rhs_tiled: memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>,
-      %dst_tiled: memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>
+      %lhs_tiled: memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>,
+      %rhs_tiled: memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>,
+      %dst_tiled: memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>
   ) {
     %lhs = tpu.erase_memref_layout %lhs_tiled
-        : memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>
-       -> memref<128xf32, #tpu.memory_space<vmem>>
+        : memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>
+       -> memref<8x128xf32, #tpu.memory_space<vmem>>
     %rhs = tpu.erase_memref_layout %rhs_tiled
-        : memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>
-       -> memref<128xf32, #tpu.memory_space<vmem>>
+        : memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>
+       -> memref<8x128xf32, #tpu.memory_space<vmem>>
     %dst = tpu.erase_memref_layout %dst_tiled
-        : memref<128xf32, #tpu.tiled<1,(128)>, #tpu.memory_space<vmem>>
-       -> memref<128xf32, #tpu.memory_space<vmem>>
+        : memref<8x128xf32, #tpu.tiled<2,(8,128)>, #tpu.memory_space<vmem>>
+       -> memref<8x128xf32, #tpu.memory_space<vmem>>
 
     %c0 = arith.constant 0 : index
-    %v_lhs = vector.load %lhs[%c0]
-        : memref<128xf32, #tpu.memory_space<vmem>>, vector<128xf32>
-    %v_rhs = vector.load %rhs[%c0]
-        : memref<128xf32, #tpu.memory_space<vmem>>, vector<128xf32>
-    %v_sum = arith.addf %v_lhs, %v_rhs : vector<128xf32>
-    vector.store %v_sum, %dst[%c0]
-        : memref<128xf32, #tpu.memory_space<vmem>>, vector<128xf32>
+    %v_lhs = vector.load %lhs[%c0, %c0]
+        : memref<8x128xf32, #tpu.memory_space<vmem>>, vector<8x128xf32>
+    %v_rhs = vector.load %rhs[%c0, %c0]
+        : memref<8x128xf32, #tpu.memory_space<vmem>>, vector<8x128xf32>
+    %v_sum = arith.addf %v_lhs, %v_rhs : vector<8x128xf32>
+    vector.store %v_sum, %dst[%c0, %c0]
+        : memref<8x128xf32, #tpu.memory_space<vmem>>, vector<8x128xf32>
     return
   }
 }
