@@ -260,12 +260,13 @@ int main(int argc, char** argv) {
     // ---- 6. Compile ---------------------------------------------------
     PJRT_LoadedExecutable* executable = nullptr;
     {
+        static constexpr char kFormat[] = "mlir";
         PJRT_Program program{};
         program.struct_size = PJRT_Program_STRUCT_SIZE;
         program.code = const_cast<char*>(stablehlo.data());
         program.code_size = stablehlo.size();
-        program.format = "mlir";
-        program.format_size = 3;
+        program.format = kFormat;
+        program.format_size = sizeof(kFormat) - 1;  // 4, without NUL
 
         PJRT_Client_Compile_Args compile_args{};
         compile_args.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE;
