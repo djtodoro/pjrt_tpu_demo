@@ -232,39 +232,58 @@ bool AwaitEventAndDestroy(const PJRT_Api* api, PJRT_Event* event,
 
 void PrintUsage(const char* argv0) {
     std::cerr
-        << "Usage: " << argv0
-        << " <mosaic_mlir_file> <libtpu_so> [<output_blob_path>]\n\n"
+        << "Usage:\n"
+        << "  " << argv0 << " <mosaic_mlir_file> <libtpu_so> [<output_blob_path>]\n"
+        << "  " << argv0 << " --load-blob <libtpu_so> <input_blob_path>\n\n"
         << "Arguments:\n"
         << "  <mosaic_mlir_file>   Mosaic MLIR source file (e.g. vector_add.mlir)\n"
         << "  <libtpu_so>          TPU PJRT plugin exporting GetPjrtApi\n"
         << "                       (e.g. .../site-packages/libtpu/libtpu.so)\n"
         << "  <output_blob_path>   Optional. If given, the compiled PJRT\n"
         << "                       executable is serialized to this path\n"
-        << "                       after compilation.\n";
+        << "                       after compilation.\n"
+        << "  --load-blob          Load a previously serialized PJRT executable\n"
+        << "                       instead of compiling from MLIR.\n"
+        << "  <input_blob_path>    Path to a serialized PJRT executable.\n";
 }
 
 int main(int argc, char** argv) {
     // Scan for the optional --trivial flag (diagnostic only).
     bool trivial = false;
+    bool load_blob = false;
     std::vector<char*> positional;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--trivial") == 0) {
             trivial = true;
+        } else if (std::strcmp(argv[i], "--load-blob") == 0) {
+            load_blob = true;
         } else {
             positional.push_back(argv[i]);
         }
     }
-    if (positional.size() != 2 && positional.size() != 3) {
+
+    const char* mosaic_path = nullptr;
+    const char* libtpu_path = nullptr;
+    const char* blob_out_path = nullptr;
+    const char* blob_in_path = nullptr;
+    
+    if ((positional.size() != 2 && positional.size() != 3 && !load_blob) || 
+        (positional.size() != 2 && load_blob)) {
         PrintUsage(argc > 0 ? argv[0] : "pjrt-demo");
         return 1;
     }
-    const char* mosaic_path = positional[0];
-    const char* libtpu_path = positional[1];
-    const char* blob_out_path =
-        (positional.size() == 3) ? positional[2] : nullptr;
 
     std::cout << "=== pjrt-demo ===\n";
-    std::cout << "Mosaic MLIR: " << mosaic_path << "\n";
+    if (load_blob) {
+        blob_in_path = positional[0];
+        std::cout << "Serialized blob: " << blob_in_path << "\n";
+    } else {
+        mosaic_path = positional[0];
+        blob_out_path =
+            (positional.size() == 3) ? positional[2] : nullptr;
+        std::cout << "Mosaic MLIR: " << mosaic_path << "\n";
+    }
+    libtpu_path = positional[1];
     std::cout << "PJRT plugin: " << libtpu_path << "\n\n";
 
     // ---- 1. Load PJRT plugin ------------------------------------------
@@ -316,110 +335,149 @@ int main(int argc, char** argv) {
                   << " addressable device(s); using device[0]\n";
     }
 
-    // ---- 5. Load Mosaic MLIR and wrap in StableHLO --------------------
-    std::string stablehlo;
-    if (trivial) {
-        stablehlo = BuildTrivialPassThroughStableHlo();
-        std::cout << "[5] --trivial: using pass-through StableHLO ("
-                  << stablehlo.size() << " bytes), ignoring "
-                  << mosaic_path << "\n";
-    } else {
-        std::string mosaic_text = LoadTextFile(mosaic_path);
-        if (mosaic_text.empty()) return 1;
-        stablehlo = WrapMosaicInStableHlo(mosaic_text);
-        std::cout << "[5] Loaded Mosaic (" << mosaic_text.size()
-                  << " bytes) and wrapped into StableHLO ("
-                  << stablehlo.size() << " bytes)\n";
-    }
-
-    // ---- 6. Compile ---------------------------------------------------
     PJRT_LoadedExecutable* executable = nullptr;
-    {
-        static constexpr char kFormat[] = "mlir";
-        PJRT_Program program{};
-        program.struct_size = PJRT_Program_STRUCT_SIZE;
-        program.code = const_cast<char*>(stablehlo.data());
-        program.code_size = stablehlo.size();
-        program.format = kFormat;
-        program.format_size = sizeof(kFormat) - 1;  // 4, without NUL
+    if (!load_blob) {
+        // ---- 5. Load Mosaic MLIR and wrap in StableHLO --------------------
+        std::string stablehlo;
+        if (trivial) {
+            stablehlo = BuildTrivialPassThroughStableHlo();
+            std::cout << "[5] --trivial: using pass-through StableHLO ("
+                    << stablehlo.size() << " bytes), ignoring "
+                    << mosaic_path << "\n";
+        } else {
+            std::string mosaic_text = LoadTextFile(mosaic_path);
+            if (mosaic_text.empty()) return 1;
+            stablehlo = WrapMosaicInStableHlo(mosaic_text);
+            std::cout << "[5] Loaded Mosaic (" << mosaic_text.size()
+                    << " bytes) and wrapped into StableHLO ("
+                    << stablehlo.size() << " bytes)\n";
+        }
+    
 
-        // Minimal CompileOptionsProto (from xla/pjrt/compile_options.proto):
-        //   CompileOptionsProto.executable_build_options (field 3, message)
-        //     ExecutableBuildOptionsProto.num_replicas   (field 4, int64) = 1
-        //     ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
-        //
-        // Wire format:
-        //   0x1A 0x04  = tag(field=3, wire=length-delim), length=4
-        //     0x20 0x01 = tag(field=4, wire=varint), value=1    (num_replicas)
-        //     0x28 0x01 = tag(field=5, wire=varint), value=1    (num_partitions)
-        //
-        // Without this, PJRT rejects with "Invalid (replica_count,
-        // computation_count) pair: (0,0)".
-        static constexpr unsigned char kCompileOptions[] = {
-            0x1A, 0x04, 0x20, 0x01, 0x28, 0x01,
-        };
+        // ---- 6. Compile ---------------------------------------------------
+        {
+            static constexpr char kFormat[] = "mlir";
+            PJRT_Program program{};
+            program.struct_size = PJRT_Program_STRUCT_SIZE;
+            program.code = const_cast<char*>(stablehlo.data());
+            program.code_size = stablehlo.size();
+            program.format = kFormat;
+            program.format_size = sizeof(kFormat) - 1;  // 4, without NUL
 
-        PJRT_Client_Compile_Args compile_args{};
-        compile_args.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE;
-        compile_args.client = client;
-        compile_args.program = &program;
-        compile_args.compile_options =
-            reinterpret_cast<const char*>(kCompileOptions);
-        compile_args.compile_options_size = sizeof(kCompileOptions);
-        if (!CheckError(api, api->PJRT_Client_Compile(&compile_args),
-                        "PJRT_Client_Compile")) {
+            // Minimal CompileOptionsProto (from xla/pjrt/compile_options.proto):
+            //   CompileOptionsProto.executable_build_options (field 3, message)
+            //     ExecutableBuildOptionsProto.num_replicas   (field 4, int64) = 1
+            //     ExecutableBuildOptionsProto.num_partitions (field 5, int64) = 1
+            //
+            // Wire format:
+            //   0x1A 0x04  = tag(field=3, wire=length-delim), length=4
+            //     0x20 0x01 = tag(field=4, wire=varint), value=1    (num_replicas)
+            //     0x28 0x01 = tag(field=5, wire=varint), value=1    (num_partitions)
+            //
+            // Without this, PJRT rejects with "Invalid (replica_count,
+            // computation_count) pair: (0,0)".
+            static constexpr unsigned char kCompileOptions[] = {
+                0x1A, 0x04, 0x20, 0x01, 0x28, 0x01,
+            };
+
+            PJRT_Client_Compile_Args compile_args{};
+            compile_args.struct_size = PJRT_Client_Compile_Args_STRUCT_SIZE;
+            compile_args.client = client;
+            compile_args.program = &program;
+            compile_args.compile_options =
+                reinterpret_cast<const char*>(kCompileOptions);
+            compile_args.compile_options_size = sizeof(kCompileOptions);
+            if (!CheckError(api, api->PJRT_Client_Compile(&compile_args),
+                            "PJRT_Client_Compile")) {
+                return 1;
+            }
+            executable = compile_args.executable;
+        }
+        std::cout << "[6] Compiled StableHLO -> PJRT_LoadedExecutable\n";
+
+        // ---- 6b. (optional) Serialize executable to disk ------------------
+        if (blob_out_path != nullptr) {
+            // Get the un-loaded Executable view of the LoadedExecutable.
+            PJRT_LoadedExecutable_GetExecutable_Args get_args{};
+            get_args.struct_size =
+                PJRT_LoadedExecutable_GetExecutable_Args_STRUCT_SIZE;
+            get_args.loaded_executable = executable;
+            if (!CheckError(api,
+                            api->PJRT_LoadedExecutable_GetExecutable(&get_args),
+                            "PJRT_LoadedExecutable_GetExecutable")) {
+                return 1;
+            }
+            PJRT_Executable* plain_exe = get_args.executable;
+
+            // Serialize it.
+            PJRT_Executable_Serialize_Args ser_args{};
+            ser_args.struct_size = PJRT_Executable_Serialize_Args_STRUCT_SIZE;
+            ser_args.executable = plain_exe;
+            if (!CheckError(api, api->PJRT_Executable_Serialize(&ser_args),
+                            "PJRT_Executable_Serialize")) {
+                return 1;
+            }
+
+            // Write to disk.
+            std::ofstream out(blob_out_path, std::ios::binary);
+            if (!out) {
+                std::cerr << "Failed to open " << blob_out_path
+                        << " for writing\n";
+                return 1;
+            }
+            out.write(ser_args.serialized_bytes,
+                    static_cast<std::streamsize>(
+                        ser_args.serialized_bytes_size));
+            out.close();
+            std::cout << "[6b] Serialized executable ("
+                    << ser_args.serialized_bytes_size << " bytes) to "
+                    << blob_out_path << "\n";
+
+            // Free the backing memory and the plain_exe wrapper.
+            ser_args.serialized_executable_deleter(
+                ser_args.serialized_executable);
+
+            PJRT_Executable_Destroy_Args exe_destroy{};
+            exe_destroy.struct_size = PJRT_Executable_Destroy_Args_STRUCT_SIZE;
+            exe_destroy.executable = plain_exe;
+            api->PJRT_Executable_Destroy(&exe_destroy);
+        }
+    } else {
+        // ---- 5. Deserialize and load -------------------------------------
+
+        // Read file into memory
+        std::ifstream in(blob_in_path, std::ios::binary | std::ios::ate);
+        if (!in) {
+            std::cerr << "Failed to open " << blob_in_path << " for reading\n";
             return 1;
         }
-        executable = compile_args.executable;
-    }
-    std::cout << "[6] Compiled StableHLO -> PJRT_LoadedExecutable\n";
 
-    // ---- 6b. (optional) Serialize executable to disk ------------------
-    if (blob_out_path != nullptr) {
-        // Get the un-loaded Executable view of the LoadedExecutable.
-        PJRT_LoadedExecutable_GetExecutable_Args get_args{};
-        get_args.struct_size =
-            PJRT_LoadedExecutable_GetExecutable_Args_STRUCT_SIZE;
-        get_args.loaded_executable = executable;
-        if (!CheckError(api,
-                        api->PJRT_LoadedExecutable_GetExecutable(&get_args),
-                        "PJRT_LoadedExecutable_GetExecutable")) {
+        std::streamsize size = in.tellg();
+        in.seekg(0, std::ios::beg);
+
+        std::vector<char> buffer(size);
+        if (!in.read(buffer.data(), size)) {
+            std::cerr << "Failed to read file " << blob_in_path << "\n";
             return 1;
         }
-        PJRT_Executable* plain_exe = get_args.executable;
+        in.close();
 
-        // Serialize it.
-        PJRT_Executable_Serialize_Args ser_args{};
-        ser_args.struct_size = PJRT_Executable_Serialize_Args_STRUCT_SIZE;
-        ser_args.executable = plain_exe;
-        if (!CheckError(api, api->PJRT_Executable_Serialize(&ser_args),
-                        "PJRT_Executable_Serialize")) {
+        // Deserialize executable
+        PJRT_Executable_DeserializeAndLoad_Args deser_args{};
+        deser_args.struct_size = PJRT_Executable_DeserializeAndLoad_Args_STRUCT_SIZE;
+        deser_args.client = client;  // PJRT_Client*
+        deser_args.serialized_executable = buffer.data();
+        deser_args.serialized_executable_size = buffer.size();
+
+        if (!CheckError(api, api->PJRT_Executable_DeserializeAndLoad(&deser_args),
+                        "PJRT_Executable_DeserializeAndLoad")) {
             return 1;
         }
 
-        // Write to disk.
-        std::ofstream out(blob_out_path, std::ios::binary);
-        if (!out) {
-            std::cerr << "Failed to open " << blob_out_path
-                      << " for writing\n";
-            return 1;
-        }
-        out.write(ser_args.serialized_bytes,
-                  static_cast<std::streamsize>(
-                      ser_args.serialized_bytes_size));
-        out.close();
-        std::cout << "[6b] Serialized executable ("
-                  << ser_args.serialized_bytes_size << " bytes) to "
-                  << blob_out_path << "\n";
+        executable = deser_args.loaded_executable;
 
-        // Free the backing memory and the plain_exe wrapper.
-        ser_args.serialized_executable_deleter(
-            ser_args.serialized_executable);
-
-        PJRT_Executable_Destroy_Args exe_destroy{};
-        exe_destroy.struct_size = PJRT_Executable_Destroy_Args_STRUCT_SIZE;
-        exe_destroy.executable = plain_exe;
-        api->PJRT_Executable_Destroy(&exe_destroy);
+        std::cout << "[5] Deserialized executable from "
+                << blob_in_path << "\n";
     }
 
     // ---- 7. Prepare host-side inputs ----------------------------------
